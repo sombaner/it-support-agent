@@ -2,7 +2,7 @@
 # Install with: pip install -r requirements-dev.txt
 -r requirements.txt
 
-debugpy>=1.8.5
+debugpy>=1.8.22
 
 # Web demo surface (src/app.py): FastAPI chat UI served with uvicorn.
 fastapi>=0.115.0
