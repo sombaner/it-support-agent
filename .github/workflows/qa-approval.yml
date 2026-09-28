@@ -1,0 +1,52 @@
+name: QA Approval
+
+# Manual gate between a green evaluation run and the QA rollout.
+# The approval is enforced by required reviewers on the `qa-approval` GitHub
+# environment. When this workflow completes successfully, Deploy to QA starts
+# through its own `workflow_run` trigger — GITHUB_TOKEN cannot reliably raise a
+# workflow_dispatch, so the chained event is used instead.
+
+on:
+  workflow_run:
+    workflows: ["Run Agent Evaluations"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-approval
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    # Only a green evaluation run may request promotion to QA.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: qa-approval
+
+    steps:
+      - name: Record approval
+        env:
+          TRIGGER: ${{ github.event_name }}
+          EVAL_RUN: ${{ github.event.workflow_run.html_url }}
+          EVAL_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### QA promotion approved"
+            echo ""
+            echo "- Trigger: \`${TRIGGER}\`"
+            if [ -n "${EVAL_SHA:-}" ]; then
+              echo "- Evaluated commit: \`${EVAL_SHA}\`"
+            fi
+            if [ -n "${EVAL_RUN:-}" ]; then
+              echo "- Evaluation run: ${EVAL_RUN}"
+            fi
+            echo ""
+            echo "Deploy to QA starts automatically."
+          } >> "$GITHUB_STEP_SUMMARY"

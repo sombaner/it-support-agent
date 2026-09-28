@@ -1,0 +1,6 @@
+# Runtime dependencies for the chat UI container (src/app.py).
+# The agent runtime pins live in requirements.txt; this file only adds the web server.
+-r requirements.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0

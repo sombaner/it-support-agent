@@ -1,0 +1,6 @@
+# Placeholder Foundry configuration for the IT Support Agent.
+
+agent:
+  name: it-support-agent
+  description: Placeholder configuration for a Foundry-hosted IT support agent.
+  entrypoint: src.agent:main

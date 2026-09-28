@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: it-support-agent
+infra:
+    provider: microsoft.foundry
+
+# Hosted Foundry agent (direct-code deploy). The project is reused, not
+# provisioned — endpoint, model, subscription, and location come from the active
+# azd env (fed by GitHub Variables in CI), so there is no ai-project model block.
+# `azd deploy` zips the repo root (minus .agentignore); Foundry builds it from
+# requirements.txt (remote_build).
+services:
+    it-support-agent:
+        project: .
+        host: azure.ai.agent
+        language: python
+        kind: hosted
+        name: it-support-agent
+        description: >-
+            IT Support Agent helps employees troubleshoot issues (network,
+            VPN, Teams call quality, account/password reset, printers, and
+            endpoint health) using built-in diagnostic tools and returns a
+            structured support summary.
+        codeConfiguration:
+            runtime: python_3_13
+            entryPoint: main.py
+            dependencyResolution: remote_build
+        container:
+            resources:
+                cpu: "1"
+                memory: 2Gi
+        environmentVariables:
+            - name: AZURE_AI_PROJECT_ENDPOINT
+              value: ${AZURE_AI_PROJECT_ENDPOINT}
+            - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+              value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+        protocols:
+            - protocol: responses
+              version: 1.0.0

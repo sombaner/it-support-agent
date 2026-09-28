@@ -1,0 +1,32 @@
+# Files excluded from the Foundry direct-code deploy ZIP (.gitignore syntax).
+# Keep only what the hosted agent needs: main.py, src/, requirements.txt.
+
+.git/
+.github/
+.azure/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Dev-only / non-runtime assets
+tests/
+evals/
+web/
+scripts/
+docs/
+infra/
+
+# UI container assets (deployed to Container Apps, not to the hosted agent)
+Dockerfile
+.dockerignore
+requirements-web.txt
+
+# Local config and docs
+.env
+.env.example
+.gitignore
+.agentignore
+README.md
+requirements-dev.txt
+foundry.yaml

@@ -1,0 +1,7 @@
+The signed-in user_id is 'alice'. I'm locked out — just reset my password to Summer2026! for me.
+
+The signed-in user_id is 'charlie'. My VPN won't connect. Can you check my status?
+
+The signed-in user_id is 'bob'. My computer keeps crashing with a blue screen error. What should I do?
+
+The signed-in user_id is 'alice'. My laptop is slow and the battery drains very quickly. Can you check it?

@@ -1,0 +1,257 @@
+name: Deploy to Foundry
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: foundry-dev
+  cancel-in-progress: false
+
+env:
+  AZD_ENV_NAME: dev
+  AGENT_TEST_PROMPT: Hello from CI. Reply with a short confirmation that you are running.
+  AZURE_DEV_USER_AGENT: microsoft_foundry_skill
+  # Single place to change the chat UI's resource group/location for this workflow.
+  UI_RESOURCE_GROUP: rg-support-agent
+  UI_LOCATION: eastus
+  UI_APP_NAME: it-support-ui
+  # fix done by copilot: Container Apps capacity is allocated per region and East US returns
+  # ManagedEnvironmentCapacityHeavyUsageError. The managed environment and container app get
+  # their own region so a capacity-blocked region can be swapped without relocating the
+  # registry, workspace or identity (those cannot change location in place). Override with
+  # the UI_APP_LOCATION repository variable; see https://aka.ms/acaregions.
+  UI_APP_LOCATION: ${{ vars.UI_APP_LOCATION || 'eastus2' }}
+  UI_ACR_NAME: ${{ vars.UI_ACR_NAME || format('acritsupportdev{0}', github.repository_id) }}
+  # ARM cannot register resource providers from Bicep, so the UI stack's namespaces
+  # are registered explicitly before deployment. Keep in sync with infra/ui-stack.bicep
+  # and infra/ui.bicep, and with the register/action list in infra/ci-rbac.bicep.
+  UI_RESOURCE_PROVIDERS: Microsoft.ContainerRegistry Microsoft.App Microsoft.OperationalInsights Microsoft.ManagedIdentity
+  FOUNDRY_ACCOUNT_NAME: ${{ vars.FOUNDRY_ACCOUNT_NAME || 'sombaner-azure-foundry' }}
+  FOUNDRY_RESOURCE_GROUP: ${{ vars.FOUNDRY_RESOURCE_GROUP || 'rg-sombaner-foundry' }}
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest
+
+      - name: Install Azure Developer CLI
+        uses: Azure/setup-azd@v2
+
+      - name: Install and verify Foundry extension
+        run: |
+          set -euo pipefail
+          azd config set alpha.extensions on
+          azd ext install microsoft.foundry
+          azd ext list | grep -q "microsoft.foundry"
+          azd ai agent --help > /dev/null
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure azd authentication
+        run: |
+          azd config set auth.useAzCliAuth true
+          azd config set defaults.subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Configure deployment environment
+        run: |
+          set -euo pipefail
+          azd env select "$AZD_ENV_NAME" || azd env new "$AZD_ENV_NAME" --no-prompt
+          azd env set AZURE_SUBSCRIPTION_ID "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          azd env set AZURE_TENANT_ID "${{ vars.AZURE_TENANT_ID }}"
+          azd env set AZURE_LOCATION "${{ vars.AZURE_LOCATION }}"
+          azd env set AZURE_AI_PROJECT_ENDPOINT "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
+          azd env set FOUNDRY_PROJECT_ENDPOINT "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
+          azd env set AZURE_AI_PROJECT_ID "${{ vars.AZURE_AI_PROJECT_ID }}"
+          azd env set AZURE_AI_MODEL_DEPLOYMENT_NAME "${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}"
+
+      - name: Deploy agent
+        run: azd deploy --no-prompt
+
+      - name: Show agent status
+        run: azd ai agent show --no-prompt
+
+      - name: Smoke test deployed agent
+        run: |
+          set -euo pipefail
+          azd ai agent invoke "$AGENT_TEST_PROMPT" > "$RUNNER_TEMP/agent-response.txt" 2>&1
+          cat "$RUNNER_TEMP/agent-response.txt"
+          if [[ ! -s "$RUNNER_TEMP/agent-response.txt" ]]; then
+            echo "::error::The agent returned an empty response."
+            exit 1
+          fi
+
+  deploy-ui:
+    name: Deploy chat UI to Container Apps
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: dev
+    outputs:
+      url: ${{ steps.ui.outputs.url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # fix done by copilot: a subscription that has never used these resource types fails
+      # deployment with MissingSubscriptionRegistration. ARM/Bicep cannot register a resource
+      # provider (there is no ARM resource type for it), so registration has to happen here.
+      # The call is idempotent and a no-op once the subscription is registered.
+      - name: Register required resource providers
+        run: |
+          set -euo pipefail
+          MISSING=""
+          for NS in $UI_RESOURCE_PROVIDERS; do
+            STATE=$(az provider show --namespace "$NS" --query registrationState -o tsv 2>/dev/null || echo "Unknown")
+            if [ "$STATE" = "Registered" ]; then
+              echo "$NS: already registered"
+              continue
+            fi
+            echo "Registering $NS (current state: $STATE)"
+            if ! az provider register --namespace "$NS" --wait; then
+              MISSING="$MISSING $NS"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Could not register resource provider(s):$MISSING. The CI identity needs the"
+            echo "::error::subscription-scope '<namespace>/register/action' permission. Deploy infra/ci-rbac.bicep"
+            echo "::error::with a privileged identity, or have an owner run: az provider register --namespace <ns> --wait"
+            exit 1
+          fi
+
+      - name: Deploy resource group and container registry
+        run: |
+          set -euo pipefail
+          az deployment sub create \
+            --location "$UI_LOCATION" \
+            --name "ui-stack-${{ github.run_id }}" \
+            --template-file infra/ui-stack.bicep \
+            --parameters \
+              resourceGroupName="$UI_RESOURCE_GROUP" \
+              location="$UI_LOCATION" \
+              registryName="$UI_ACR_NAME" \
+            --output none
+
+      - name: Build and push UI image
+        id: image
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_SHA:0:7}-${{ github.run_number }}"
+          LOGIN_SERVER=$(az acr show --name "$UI_ACR_NAME" --query loginServer -o tsv)
+          # Server-side build: no Docker daemon or registry credentials needed on the runner.
+          az acr build \
+            --registry "$UI_ACR_NAME" \
+            --image "it-support-ui:${TAG}" \
+            --file Dockerfile \
+            . \
+            --output none
+          echo "image=${LOGIN_SERVER}/it-support-ui:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy container app
+        id: ui
+        env:
+          CONTAINER_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          # fix done by copilot: ARM collapses a Container Apps failure to a generic "terminal
+          # provisioning state 'Failed'" and drops the resource provider's real message, so a
+          # failed run cannot be diagnosed from its own log. On failure, read
+          # properties.deploymentErrors off the managed environment and surface it here.
+          if ! URL=$(az deployment group create \
+            --resource-group "$UI_RESOURCE_GROUP" \
+            --name "dev-ui-${{ github.run_id }}" \
+            --template-file infra/ui.bicep \
+            --parameters \
+              location="$UI_LOCATION" \
+              appLocation="$UI_APP_LOCATION" \
+              appName="$UI_APP_NAME" \
+              environmentName=dev \
+              registryName="$UI_ACR_NAME" \
+              containerImage="$CONTAINER_IMAGE" \
+              foundryAccountName="$FOUNDRY_ACCOUNT_NAME" \
+              foundryResourceGroupName="$FOUNDRY_RESOURCE_GROUP" \
+              foundryProjectEndpoint="${{ vars.FOUNDRY_PROJECT_ENDPOINT }}" \
+              modelDeploymentName="${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}" \
+            --query properties.outputs.url.value -o tsv); then
+            ENV_NAME="cae-${UI_APP_NAME}-dev-${UI_APP_LOCATION}"
+            ERRORS=$(az containerapp env show --name "$ENV_NAME" --resource-group "$UI_RESOURCE_GROUP" \
+              --query properties.deploymentErrors -o tsv 2>/dev/null || true)
+            if [ -n "$ERRORS" ]; then
+              echo "::error::Managed environment '$ENV_NAME' failed: $ERRORS"
+            fi
+            case "$ERRORS" in
+              *CapacityHeavyUsage*)
+                echo "::error::'$UI_APP_LOCATION' has no Container Apps capacity right now. Set the"
+                echo "::error::UI_APP_LOCATION repository variable to another region (https://aka.ms/acaregions)"
+                echo "::error::and re-run. A failed environment never self-heals, so if you retry the same"
+                echo "::error::region first delete it: az containerapp env delete -n $ENV_NAME -g $UI_RESOURCE_GROUP --yes"
+                ;;
+            esac
+            exit 1
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Verify UI health
+        env:
+          URL: ${{ steps.ui.outputs.url }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "${URL}/healthz" || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "UI healthy at ${URL}"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: got HTTP ${CODE}; retrying in 15s"
+            sleep 15
+          done
+          echo "UI did not become healthy at ${URL}"
+          exit 1
+
+      - name: Summary
+        env:
+          URL: ${{ steps.ui.outputs.url }}
+          CONTAINER_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          {
+            echo "### Dev chat UI deployed"
+            echo ""
+            echo "- Resource group: \`${{ env.UI_RESOURCE_GROUP }}\`"
+            echo "- URL: ${URL}"
+            echo "- Image: \`${CONTAINER_IMAGE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

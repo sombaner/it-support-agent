@@ -1,0 +1,57 @@
+name: Deployed Agent Eval Approval
+
+# Manual gate between a successful "Deploy to Foundry" run and the post-deploy
+# evaluation of the live agent. Approval is enforced by required reviewers
+# configured on the `deployed-agent-eval-approval` GitHub environment
+# (Settings > Environments > deployed-agent-eval-approval > required reviewers).
+#
+# When this workflow completes successfully, "Evaluate Deployed Agent" starts
+# through its own workflow_run trigger. GITHUB_TOKEN cannot reliably raise a
+# workflow_dispatch event, so the chained workflow_run event is used instead
+# (same pattern as qa-approval.yml -> deploy-qa.yml).
+
+on:
+  workflow_run:
+    workflows: ["Deploy to Foundry"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployed-agent-eval-approval
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    name: Approve deployed agent evaluation
+    # Guard the chained trigger: only a successful deploy may request approval.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: deployed-agent-eval-approval
+
+    steps:
+      - name: Record approval
+        env:
+          TRIGGER: ${{ github.event_name }}
+          DEPLOY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Deployed agent evaluation approved"
+            echo ""
+            echo "- Trigger: \`${TRIGGER}\`"
+            if [ -n "${DEPLOY_SHA:-}" ]; then
+              echo "- Deployed commit: \`${DEPLOY_SHA}\`"
+            fi
+            if [ -n "${DEPLOY_RUN_URL:-}" ]; then
+              echo "- Deployment run: ${DEPLOY_RUN_URL}"
+            fi
+            echo ""
+            echo "Evaluate Deployed Agent starts automatically."
+          } >> "$GITHUB_STEP_SUMMARY"

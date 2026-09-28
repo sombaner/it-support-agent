@@ -1,0 +1,140 @@
+name: Evaluate Deployed Agent
+
+# Runs the deployed-agent eval harness (evals/run_deployed_agent_evals.py)
+# against the live Foundry agent. Gated behind a human approval: this workflow
+# only starts after "Deployed Agent Eval Approval" completes successfully.
+#
+# Jobs declare `environment: dev` to reuse the same federated credential
+# (repo:<org>/<repo>:environment:dev) as run-agent-evals.yml and the former
+# inline job in deploy-to-foundry.yml.
+
+on:
+  workflow_run:
+    workflows: ["Deployed Agent Eval Approval"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Commit SHA or branch to evaluate. Defaults to this workflow's ref.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: evaluate-deployed-agent
+  cancel-in-progress: false
+
+env:
+  AZD_ENV_NAME: dev
+  AZD_AGENT_NAME: it-support-agent
+
+jobs:
+  evaluate:
+    name: Evaluate deployed agent
+    # Guard the chained trigger: only a successful approval may run the eval.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 30
+    # Advisory until deployed-agent scores prove stable; a flaky judge must not
+    # block anything downstream.
+    continue-on-error: true
+    env:
+      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+      FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}
+      EVAL_THRESHOLD: ${{ vars.DEPLOYED_EVAL_THRESHOLD || '3.0' }}
+      # Restricts DefaultAzureCredential to developer credentials so it uses the
+      # azure/login CLI session instead of probing IMDS for a managed identity.
+      AZURE_TOKEN_CREDENTIALS: dev
+
+    steps:
+      - name: Resolve commit
+        id: resolve
+        env:
+          INPUT_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          REF="${INPUT_REF:-}"
+          if [ -z "$REF" ]; then
+            REF="${{ github.sha }}"
+          fi
+          echo "source_ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.source_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Azure Developer CLI
+        uses: Azure/setup-azd@v2
+
+      - name: Install and verify Foundry extension
+        run: |
+          set -euo pipefail
+          azd config set alpha.extensions on
+          azd ext install microsoft.foundry
+          azd ext list | grep -q "microsoft.foundry"
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure azd authentication
+        run: |
+          azd config set auth.useAzCliAuth true
+          azd config set defaults.subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+
+      # azd environment state lives in .azure/ on the runner's filesystem and does not
+      # survive across jobs/workflows, so this repeats deploy-dev's "Configure
+      # deployment environment" step. Keep the two blocks in sync.
+      - name: Configure deployment environment
+        run: |
+          set -euo pipefail
+          azd env select "$AZD_ENV_NAME" || azd env new "$AZD_ENV_NAME" --no-prompt
+          azd env set AZURE_SUBSCRIPTION_ID "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          azd env set AZURE_TENANT_ID "${{ vars.AZURE_TENANT_ID }}"
+          azd env set AZURE_LOCATION "${{ vars.AZURE_LOCATION }}"
+          azd env set AZURE_AI_PROJECT_ENDPOINT "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
+          azd env set FOUNDRY_PROJECT_ENDPOINT "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
+          azd env set AZURE_AI_PROJECT_ID "${{ vars.AZURE_AI_PROJECT_ID }}"
+          azd env set AZURE_AI_MODEL_DEPLOYMENT_NAME "${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}"
+
+      - name: Verify deployed agent
+        run: azd ai agent show "$AZD_AGENT_NAME" --no-prompt
+
+      - name: Run deployed agent evaluations
+        timeout-minutes: 20
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          python -m evals.run_deployed_agent_evals 2>&1 | tee deployed-agent-eval-results.txt
+
+      - name: Upload evaluation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-agent-eval-results-${{ github.run_id }}
+          path: deployed-agent-eval-results.txt
+          if-no-files-found: error
+          retention-days: 30

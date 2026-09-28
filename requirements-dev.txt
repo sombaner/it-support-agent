@@ -1,0 +1,14 @@
+# Local development-only tooling.
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+
+debugpy>=1.8.5
+
+# Web demo surface (src/app.py): FastAPI chat UI served with uvicorn.
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# NOTE: agent-dev-cli (the local `agentdev` run/serve/inspector tool) is a
+# pre-release that pins agent-framework-core<1.3.0 and cannot coexist with the
+# runtime pin (1.14.0). Install it in a separate throwaway venv if you need it
+# for local debugging; keep it out of this shared environment.
