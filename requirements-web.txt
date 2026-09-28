@@ -3,4 +3,4 @@
 -r requirements.txt
 
 fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+uvicorn[standard]>=0.54.0
