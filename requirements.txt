@@ -5,4 +5,4 @@ agent-framework-foundry-hosting==1.0.0b260813
 azure-identity>=1.23.0
 httpx[socks]>=0.28.1,<1
 python-dotenv>=1.0.1
-pytest>=8.3.2
+pytest>=9.1.1
