@@ -4,5 +4,5 @@ agent-framework-foundry-hosting==1.0.0b260813
 # 1.23+ is required for AZURE_TOKEN_CREDENTIALS, used to pin the CI credential chain.
 azure-identity>=1.23.0
 httpx[socks]>=0.28.1,<1
-python-dotenv>=1.0.1
+python-dotenv>=1.2.4
 pytest>=8.3.2
