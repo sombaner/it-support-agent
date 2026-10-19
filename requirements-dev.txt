@@ -5,7 +5,7 @@
 debugpy>=1.8.5
 
 # Web demo surface (src/app.py): FastAPI chat UI served with uvicorn.
-fastapi>=0.115.0
+fastapi>=0.143.3
 uvicorn>=0.30.0
 
 # NOTE: agent-dev-cli (the local `agentdev` run/serve/inspector tool) is a

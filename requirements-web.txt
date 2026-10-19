@@ -2,5 +2,5 @@
 # The agent runtime pins live in requirements.txt; this file only adds the web server.
 -r requirements.txt
 
-fastapi>=0.115.0
+fastapi>=0.143.3
 uvicorn[standard]>=0.30.0
